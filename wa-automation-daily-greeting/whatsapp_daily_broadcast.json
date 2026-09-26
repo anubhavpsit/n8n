@@ -1,0 +1,623 @@
+{
+  "name": "Daily WhatsApp Broadcast (10 AM) - Ollama + Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 10
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "10 AM Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-01",
+              "name": "waServerUrl",
+              "value": "http://localhost:3000",
+              "type": "string"
+            },
+            {
+              "id": "cfg-03",
+              "name": "waApiKey",
+              "value": "a3f9c2e17b4d8e05f6a1c9b2d3e4f5a6",
+              "type": "string"
+            },
+            {
+              "id": "cfg-04",
+              "name": "contactsApiUrl",
+              "value": "https://classly.tech/api/v1/demo/users?tenant_id=11",
+              "type": "string"
+            },
+            {
+              "id": "cfg-05",
+              "name": "contactsApiToken",
+              "value": "7e59696dd2e0ca1ce463d1eadd553e26d24a9fd9ec097de25b011913b640ecf2",
+              "type": "string"
+            },
+            {
+              "id": "cfg-06",
+              "name": "ollamaUrl",
+              "value": "http://localhost:11434",
+              "type": "string"
+            },
+            {
+              "id": "cfg-07",
+              "name": "ollamaModel",
+              "value": "llama3.1",
+              "type": "string"
+            },
+            {
+              "id": "cfg-08",
+              "name": "contentPrompt",
+              "value": "Write a short, friendly WhatsApp good-morning message (max 60 words) with one useful tip for the day. Do not include a greeting name, do not use markdown, reply with the message text only.",
+              "type": "string"
+            },
+            {
+              "id": "cfg-09",
+              "name": "reportEmail",
+              "value": "quiz.howk@gmail.com",
+              "type": "string"
+            },
+            {
+              "id": "cfg-10",
+              "name": "fromEmail",
+              "value": "quiz.howk@gmail.com",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.waServerUrl }}/status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Config').first().json.waApiKey }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Check WhatsApp Login",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-login",
+              "leftValue": "={{ $json.loggedIn }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Logged In?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Config').first().json.fromEmail }}",
+        "toEmail": "={{ $('Config').first().json.reportEmail }}",
+        "subject": "WhatsApp session is logged out",
+        "emailFormat": "text",
+        "text": "=The 10 AM WhatsApp broadcast did not run because the WhatsApp server is not logged in (or not reachable).\n\nResponse: {{ $json.error?.message || JSON.stringify($json) }}\n\nOpen {{ $('Config').first().json.waServerUrl }}/qr?key=YOUR_KEY and scan the QR code again.",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Send Login Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        880,
+        500
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.contactsApiUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Config').first().json.contactsApiToken }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Get Contacts (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        200
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise whatever the contacts API returns into one item:\n// { count, contacts: [{ name, phone, chatId }], invalid: [{ name, phone, reason }] }\n// Accepts: a plain array, or an object with data / contacts / results array.\nlet raw = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  if (Array.isArray(j)) raw.push(...j);\n  else if (Array.isArray(j.data)) raw.push(...j.data);\n  else if (Array.isArray(j.contacts)) raw.push(...j.contacts);\n  else if (Array.isArray(j.results)) raw.push(...j.results);\n  else if (j && Object.keys(j).length) raw.push(j);\n}\n\nconst contacts = [];\nconst invalid = [];\nconst seen = new Set();\n\nfor (const c of raw) {\n  const name = c.name || c.full_name || c.first_name || '';\n  const phoneRaw = String(c.phone ?? c.mobile ?? c.number ?? c.whatsapp ?? '');\n  let digits = phoneRaw.replace(/\\D/g, '');\n  if (digits.length === 10) digits = '91' + digits;          // assume India if no country code\n  if (digits.length === 11 && digits.startsWith('0')) digits = '91' + digits.slice(1);\n\n  if (digits.length < 11 || digits.length > 15) {\n    invalid.push({ name, phone: phoneRaw, reason: 'Invalid / missing phone number' });\n    continue;\n  }\n  if (seen.has(digits)) continue;                              // skip duplicates\n  seen.add(digits);\n  contacts.push({ name, phone: digits, chatId: `${digits}@c.us` });\n}\n\nreturn [{ json: { count: contacts.length, contacts, invalid } }];"
+      },
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Normalize Contacts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-contacts",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Has Contacts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0009-4000-8000-000000000009",
+      "name": "No Contacts",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.ollamaUrl }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $('Config').first().json.ollamaModel, prompt: $('Config').first().json.contentPrompt, stream: false }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "a1b2c3d4-0010-4000-8000-000000000010",
+      "name": "Create Content (Ollama)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn the Ollama text + contact list into one item per contact\nconst content = String($input.first().json.response || '').trim();\nif (!content) throw new Error('Ollama returned empty content');\n\nconst { contacts } = $('Normalize Contacts').first().json;\n\nreturn contacts.map(c => ({\n  json: {\n    name: c.name,\n    phone: c.phone,\n    chatId: c.chatId,\n    text: c.name ? `Hi ${c.name},\\n\\n${content}` : content\n  }\n}));"
+      },
+      "id": "a1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Prepare Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "a1b2c3d4-0012-4000-8000-000000000012",
+      "name": "Loop Contacts",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1980,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.waServerUrl }}/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Config').first().json.waApiKey }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.phone, message: $json.text }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 180000
+        }
+      },
+      "id": "a1b2c3d4-0013-4000-8000-000000000013",
+      "name": "Send Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Record whether this contact's message went through\nconst contact = $('Loop Contacts').first().json;\nconst res = $json;\nconst code = res.statusCode;\nconst ok = !res.error && code >= 200 && code < 300 && res.body?.ok === true;\n\nlet reason = '';\nif (!ok) {\n  reason = res.error?.message\n    || (typeof res.body === 'object' ? (res.body.message || res.body.error || JSON.stringify(res.body)) : res.body)\n    || `HTTP ${code}`;\n}\n\nreturn {\n  json: {\n    name: contact.name,\n    phone: contact.phone,\n    status: ok ? 'sent' : 'failed',\n    reason: String(reason).slice(0, 300)\n  }\n};"
+      },
+      "id": "a1b2c3d4-0014-4000-8000-000000000014",
+      "name": "Record Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ Math.floor(Math.random() * 10) + 5 }}",
+        "unit": "seconds"
+      },
+      "id": "a1b2c3d4-0015-4000-8000-000000000015",
+      "name": "Random Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        200
+      ],
+      "webhookId": "b7e1f2a3-1111-4222-8333-444455556666"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Runs once after ALL contacts are processed.\n// Loop 'done' output = every result fed back into the loop.\nconst results = $input.all().map(i => i.json);\nconst sent = results.filter(r => r.status === 'sent');\nconst failed = results.filter(r => r.status === 'failed');\nconst invalid = $('Normalize Contacts').first().json.invalid || [];\n\nconst allFailed = [\n  ...failed,\n  ...invalid.map(i => ({ ...i, status: 'failed' }))\n];\n\nconst date = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });\nconst esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n\nconst rows = allFailed.map((f, idx) =>\n  `<tr><td>${idx + 1}</td><td>${esc(f.name)}</td><td>${esc(f.phone)}</td><td>${esc(f.reason)}</td></tr>`\n).join('');\n\nconst html = `\n<h2>WhatsApp Broadcast Report</h2>\n<p><b>Run time:</b> ${date}</p>\n<ul>\n  <li><b>Total attempted:</b> ${results.length}</li>\n  <li><b>Sent:</b> ${sent.length}</li>\n  <li><b>Failed:</b> ${failed.length}</li>\n  <li><b>Skipped (invalid number):</b> ${invalid.length}</li>\n</ul>\n${allFailed.length ? `\n<h3>Not delivered (${allFailed.length})</h3>\n<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\" style=\"border-collapse:collapse\">\n  <tr><th>#</th><th>Name</th><th>Phone</th><th>Reason</th></tr>\n  ${rows}\n</table>` : '<p>✅ All messages sent successfully.</p>'}\n`;\n\nreturn [{\n  json: {\n    subject: `WhatsApp report: ${sent.length} sent, ${allFailed.length} failed`,\n    html,\n    failedNumbers: allFailed.map(f => f.phone)\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0016-4000-8000-000000000016",
+      "name": "Build Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Config').first().json.fromEmail }}",
+        "toEmail": "={{ $('Config').first().json.reportEmail }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0017-4000-8000-000000000017",
+      "name": "Send Report Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2420,
+        -80
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0018-4000-8000-000000000018",
+      "name": "Exit",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2640,
+        -80
+      ]
+    }
+  ],
+  "connections": {
+    "10 AM Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Check WhatsApp Login",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check WhatsApp Login": {
+      "main": [
+        [
+          {
+            "node": "Logged In?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Logged In?": {
+      "main": [
+        [
+          {
+            "node": "Get Contacts (API)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Login Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Contacts (API)": {
+      "main": [
+        [
+          {
+            "node": "Normalize Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Contacts": {
+      "main": [
+        [
+          {
+            "node": "Has Contacts?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Contacts?": {
+      "main": [
+        [
+          {
+            "node": "Create Content (Ollama)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Content (Ollama)": {
+      "main": [
+        [
+          {
+            "node": "Prepare Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Messages": {
+      "main": [
+        [
+          {
+            "node": "Loop Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Contacts": {
+      "main": [
+        [
+          {
+            "node": "Build Report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Message": {
+      "main": [
+        [
+          {
+            "node": "Record Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Result": {
+      "main": [
+        [
+          {
+            "node": "Random Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Random Delay": {
+      "main": [
+        [
+          {
+            "node": "Loop Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Report": {
+      "main": [
+        [
+          {
+            "node": "Send Report Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Report Email": {
+      "main": [
+        [
+          {
+            "node": "Exit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "active": false
+}
