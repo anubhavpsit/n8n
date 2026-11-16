@@ -1,0 +1,320 @@
+{
+  "name": "Facebook Groups Like Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 11
+            }
+          ]
+        }
+      },
+      "id": "l1",
+      "name": "Every Day 11 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3005/status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "change-me-secret"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "l2",
+      "name": "Check Facebook Login",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.loggedIn }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "l3",
+      "name": "Logged In?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3005/jobs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "change-me-secret"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  groups: [\n    \"https://www.facebook.com/groups/1097936073608258\",\n    \"https://www.facebook.com/groups/1098967350204669\",\n    \"https://www.facebook.com/groups/1133757987335563\"\n  ],\n  posts_per_group: 5,\n  like_comments: false,\n  comments_per_post: 3,\n  min_delay_seconds: 5,\n  max_delay_seconds: 15,\n  reaction: \"Like\",\n  scrolls_per_group: 5\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "l4",
+      "name": "Start Like Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, -100],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "job-id-assign",
+              "name": "jobId",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "l5",
+      "name": "Save Job ID",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [880, -100]
+    },
+    {
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "l6",
+      "name": "Wait 30s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1100, -100],
+      "webhookId": "fb-like-poll-wait-001"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:3005/jobs/{{ $('Save Job ID').item.json.jobId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "change-me-secret"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "l7",
+      "name": "Poll Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, -100],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "regex",
+              "value2": "^(done|stopped)$"
+            }
+          ]
+        }
+      },
+      "id": "l8",
+      "name": "Job Finished?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1540, -100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $input.first().json;\nconst summary = job.summary || {};\nconst ts = new Date(job.finished_at || new Date()).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });\n\nlet body = `Facebook Groups Like Report\\n`;\nbody += `Completed: ${ts} IST\\n`;\nbody += `Status: ${job.status}\\n`;\nbody += `Reaction: ${job.reaction || 'Like'}\\n`;\nbody += `Total posts liked: ${summary.total_posts_liked || 0}\\n`;\nbody += `Total comments liked: ${summary.total_comments_liked || 0}\\n`;\nbody += `Groups done: ${summary.done || 0}  failed: ${summary.failed || 0}  skipped: ${summary.skipped || 0}\\n`;\nbody += `\\n${'─'.repeat(60)}\\n\\n`;\n\nfor (const r of (job.results || [])) {\n  body += `GROUP: ${r.group}\\n`;\n  body += `  Status : ${r.status}${r.error ? ' – ' + r.error : ''}\\n`;\n  if (r.status === 'done') {\n    body += `  Posts liked    : ${r.posts_liked || 0}\\n`;\n    body += `  Comments liked : ${r.comments_liked || 0}\\n`;\n    body += `  Buttons found  : ${r.buttons_found ?? 'n/a'}\\n`;\n    if (r.liked_posts && r.liked_posts.length > 0) {\n      body += `  Liked posts:\\n`;\n      for (const p of r.liked_posts) {\n        body += `    • ${p.author || 'Unknown author'}\\n`;\n        if (p.post_text) body += `      \"${p.post_text.slice(0, 100)}\"\\n`;\n        if (p.post_url)  body += `      ${p.post_url}\\n`;\n        body += `      Liked at: ${new Date(p.liked_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST\\n`;\n        if (p.comments_liked) body += `      Comments liked: ${p.comments_liked}\\n`;\n      }\n    } else {\n      body += `  (no post detail captured)\\n`;\n    }\n  }\n  body += `\\n`;\n}\n\nreturn [{ json: { status: job.status, total_posts_liked: summary.total_posts_liked || 0, email_body: body, results: job.results } }];"
+      },
+      "id": "l9",
+      "name": "Job Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, -200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "YOUR_GMAIL@gmail.com",
+        "toEmail": "YOUR_GMAIL@gmail.com",
+        "subject": "=✅ FB Like Bot – {{ $json.total_posts_liked }} post(s) liked | {{ $now.setZone('Asia/Kolkata').toFormat('dd LLL yyyy') }}",
+        "emailFormat": "text",
+        "text": "={{ $json.email_body }}",
+        "options": {}
+      },
+      "id": "l11",
+      "name": "Send Summary Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1980, -200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "YOUR_GMAIL@gmail.com",
+        "toEmail": "YOUR_GMAIL@gmail.com",
+        "subject": "⚠️ FB Like Bot needs login – groups were NOT liked",
+        "emailFormat": "text",
+        "text": "Hi,\n\nThe Facebook Like bot was not logged in (or not running) at {{ $now.setZone('Asia/Kolkata').toFormat('dd LLL yyyy, hh:mm a') }}.\nNo likes were given to the scheduled groups.\n\nHow to fix:\n1. Open WSL and run: pm2 status  (fb-groups-like-bot should be 'online'; if not: pm2 restart fb-groups-like-bot)\n2. See what Facebook is showing: http://localhost:3005/screen.png?key=change-me-secret\n3. Log in again:\n   Option A: pm2 stop fb-groups-like-bot, then: HEADLESS=false node server.js -> log in -> Ctrl+C -> pm2 start fb-groups-like-bot\n   Option B: export fresh cookies with Cookie-Editor and POST them to http://localhost:3005/cookies\n4. Confirm at http://localhost:3005/status?key=change-me-secret\n5. Re-run the workflow in n8n.\n\nDetails: {{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "l10",
+      "name": "Email Login Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [660, 100]
+    }
+  ],
+  "connections": {
+    "Every Day 11 AM": {
+      "main": [
+        [
+          {
+            "node": "Check Facebook Login",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Facebook Login": {
+      "main": [
+        [
+          {
+            "node": "Logged In?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Logged In?": {
+      "main": [
+        [
+          {
+            "node": "Start Like Job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email Login Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Like Job": {
+      "main": [
+        [
+          {
+            "node": "Save Job ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Job ID": {
+      "main": [
+        [
+          {
+            "node": "Wait 30s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 30s": {
+      "main": [
+        [
+          {
+            "node": "Poll Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Job Status": {
+      "main": [
+        [
+          {
+            "node": "Job Finished?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job Finished?": {
+      "main": [
+        [
+          {
+            "node": "Job Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 30s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job Summary": {
+      "main": [
+        [
+          {
+            "node": "Send Summary Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "Asia/Kolkata",
+    "executionOrder": "v1"
+  }
+}
