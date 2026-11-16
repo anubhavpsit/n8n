@@ -148,137 +148,54 @@ async function isLoggedIn() {
 // ─── Like logic ───────────────────────────────────────────────────────────────
 
 /**
- * Try to click a specific reaction (Love, Haha, etc.) by hovering the like button
- * to open the reaction strip, then clicking the named reaction.
- * Falls back to a plain Like click if the popup does not appear.
+ * Find an unliked Like button within a single article locator.
+ * Tries several strategies so it works across Facebook's changing DOM.
+ * Returns a Playwright Locator ready to click, or null if none found.
  */
-async function clickReaction(btn, reaction) {
-  if (reaction === 'Like') {
-    await btn.click({ timeout: 10000 });
-    return;
-  }
-  // Hover to open the reaction picker
-  await btn.hover({ timeout: 10000 });
-  await sleep(rand(1200, 2000)); // wait for the floating strip
-  // The reaction buttons in the strip have aria-label matching the reaction name
-  const reactionBtn = page.locator(`[aria-label="${reaction}"][role="button"]`).first();
-  if (await reactionBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await reactionBtn.click({ timeout: 10000 });
-  } else {
-    // Strip did not appear – fall back to plain like
-    await btn.click({ timeout: 10000 });
-  }
-}
+async function findLikeButtonInArticle(article) {
+  // Each strategy targets a different way Facebook renders the Like button.
+  // We check all of them and return the first visible, unclicked one.
+  const strategies = [
+    // 1. Exact aria-label="Like" on a role="button" (most common)
+    () => article.locator('[aria-label="Like"][role="button"]').first(),
+    // 2. aria-label="Like post" variant
+    () => article.locator('[aria-label="Like post"][role="button"]').first(),
+    // 3. Playwright accessibility tree lookup (works across shadow-DOM changes)
+    () => article.getByRole('button', { name: 'Like', exact: true }).first(),
+    // 4. Plain <button> whose visible text is exactly "Like"
+    () => article.locator('button').filter({ hasText: /^Like$/ }).first(),
+    // 5. Any element whose aria-label starts with "Like" but is not "Unlike"
+    () => article.locator('[aria-label^="Like"]:not([aria-label^="Unlike"])').first(),
+  ];
 
-/**
- * Scan the full DOM for unliked Like buttons and return their ABSOLUTE page positions.
- * We use absolute coords (rect + scrollY/scrollX) so the caller can scroll each button
- * into the viewport before clicking — this is the key fix for buttons that are below
- * the visible area (tall posts with images/videos push the Like bar off-screen).
- *
- * Returns [{ absX, absY, ariaLabel, visibleText }]
- */
-async function findLikeButtonPositions() {
-  return await page.evaluate(() => {
-    const results = [];
-    const seen    = new Set();
+  for (const getLocator of strategies) {
+    try {
+      const btn = getLocator();
+      if ((await btn.count()) === 0) continue;
 
-    const candidates = new Set([
-      ...document.querySelectorAll('[role="button"]'),
-      ...document.querySelectorAll('button'),
-      ...document.querySelectorAll('[tabindex="0"]'),
-    ]);
-
-    for (const el of candidates) {
-      const ariaLabel   = (el.getAttribute('aria-label') || '').trim();
-      const ariaPressed = el.getAttribute('aria-pressed');
-      const visibleText = (el.innerText || '').trim();
-
-      // Skip already-reacted
+      // Skip if already reacted
+      const ariaPressed = await btn.getAttribute('aria-pressed').catch(() => null);
       if (ariaPressed === 'true') continue;
+      const ariaLabel = (await btn.getAttribute('aria-label').catch(() => '')) || '';
       if (/^unlike|^remove/i.test(ariaLabel)) continue;
 
-      const isLike =
-        ariaLabel === 'Like' ||
-        ariaLabel === 'Like post' ||
-        visibleText === 'Like';
-      if (!isLike) continue;
+      const isVis = await btn.isVisible({ timeout: 2000 }).catch(() => false);
+      if (!isVis) continue;
 
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      // Note: NO viewport filter — include elements above/below the visible area.
-      // The caller will scroll each one into view before clicking.
-
-      // Absolute page position (survives scrolling)
-      const absX = rect.left + window.scrollX + rect.width  / 2;
-      const absY = rect.top  + window.scrollY + rect.height / 2;
-
-      const key = `${Math.round(absX / 3) * 3},${Math.round(absY / 3) * 3}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      results.push({ absX, absY, ariaLabel, visibleText: visibleText.slice(0, 30) });
+      return btn;
+    } catch {
+      // strategy failed, try next
     }
-
-    // Sort top-to-bottom so we process posts in feed order
-    results.sort((a, b) => a.absY - b.absY);
-    return results;
-  }).catch(() => []);
-}
-
-/**
- * Log all like-related aria-labels currently in the DOM.
- * Saves a /last-error.png screenshot if nothing is found (page not loaded).
- */
-async function debugLogLikeLabels(groupUrl) {
-  const labels = await page.evaluate(() => {
-    const all = [...document.querySelectorAll('[aria-label]')];
-    return [...new Set(
-      all.map(el => el.getAttribute('aria-label'))
-         .filter(l => l && /like/i.test(l))
-    )].slice(0, 30);
-  }).catch(() => []);
-
-  if (labels.length) {
-    console.log(`[${groupUrl}] like-related aria-labels: ${JSON.stringify(labels)}`);
-  } else {
-    console.log(`[${groupUrl}] WARNING: no like-related aria-labels found — page may not have loaded`);
-    lastErrorPng = await page.screenshot().catch(() => null);
   }
-  return labels;
+  return null;
 }
 
 /**
- * After clicking a Like button at (x, y), wait briefly then check whether
- * the element at that position (or any ancestor) now shows "Unlike" or a
- * reaction-remove label. Returns true = like confirmed, false = unverified.
+ * Extract human-readable details from an article locator.
+ * Returns { postUrl, postText, author } — any field may be null.
  */
-async function verifyLikeRegistered(x, y) {
-  await sleep(2500); // give Facebook time to update the DOM
-  return await page.evaluate(({ x, y }) => {
-    let el = document.elementFromPoint(x, y);
-    let steps = 0;
-    while (el && steps < 12) {
-      const label = (el.getAttribute('aria-label') || '').toLowerCase();
-      const text  = (el.innerText || '').trim().toLowerCase();
-      if (/^unlike|^remove/.test(label) || text === 'unlike') return true;
-      el = el.parentElement;
-      steps++;
-    }
-    return false;
-  }, { x, y }).catch(() => false);
-}
-
-/**
- * Extract human-readable details from the article element containing a like button.
- * Returns { postUrl, postText, author } — any may be null if not found.
- */
-async function extractPostDetails(btn) {
+async function extractDetailsFromArticle(article) {
   try {
-    const article = page.locator('[role="article"]').filter({ has: btn }).last();
-    if ((await article.count()) === 0) return {};
-
-    // Permalink: timestamp <a> linking to the post
     let postUrl = null;
     const timeLink = article
       .locator('a[href*="/posts/"], a[href*="story_fbid"], a[href*="/permalink/"]')
@@ -288,7 +205,6 @@ async function extractPostDetails(btn) {
       if (href) postUrl = href.startsWith('http') ? href : `https://www.facebook.com${href}`;
     }
 
-    // Post text snippet
     let postText = null;
     const textEl = article.locator('[data-ad-preview="message"], div[dir="auto"]').first();
     if ((await textEl.count()) > 0) {
@@ -296,7 +212,6 @@ async function extractPostDetails(btn) {
       if (raw) postText = raw.trim().replace(/\s+/g, ' ').slice(0, 150);
     }
 
-    // Author name
     let author = null;
     const authorEl = article.locator('h2 a, h3 a, strong a').first();
     if ((await authorEl.count()) > 0) {
@@ -310,35 +225,41 @@ async function extractPostDetails(btn) {
 }
 
 /**
- * Like comments that are visible below a post's y-position.
- * Uses the same coordinate approach as the main like logic.
- * Returns the number of comments liked.
+ * Log all like-related aria-labels currently in the DOM.
+ * Saves a last-error screenshot if nothing is found.
  */
-async function likeComments(postY, maxComments, minDelay, maxDelay) {
-  // Comment Like buttons appear below the post action bar
-  const allBtns = await findLikeButtonPositions();
-  const commentBtns = allBtns.filter(b => b.y > postY + 60); // below the post's like bar
-  const shuffled = commentBtns.sort(() => Math.random() - 0.5).slice(0, maxComments);
-  let liked = 0;
-  for (const btn of shuffled) {
-    try {
-      await page.mouse.click(btn.x, btn.y);
-      liked++;
-      if (liked < shuffled.length) await sleep(rand(minDelay, maxDelay));
-    } catch { /* skip */ }
+async function debugLogLikeLabels(groupUrl) {
+  const labels = await page.evaluate(() => {
+    const all = [...document.querySelectorAll('[aria-label]')];
+    return [...new Set(
+      all.map(el => el.getAttribute('aria-label'))
+         .filter(l => l && /like/i.test(l))
+    )].slice(0, 30);
+  }).catch(() => []);
+
+  if (labels.length) {
+    console.log(`[${groupUrl}] like-related aria-labels on page: ${JSON.stringify(labels)}`);
+  } else {
+    console.log(`[${groupUrl}] WARNING: no like-related aria-labels found — page may not have loaded`);
+    lastErrorPng = await page.screenshot().catch(() => null);
   }
-  return liked;
+  return labels;
 }
 
 /**
- * Navigate to a group, wait for the feed, then interleave scroll+collect+like.
+ * Navigate to a group, scroll article-by-article, and like posts.
  *
- * Post selection:
- *   findLikeButtonPositions() scans the raw DOM via page.evaluate() and returns
- *   viewport (x,y) coordinates of every visible unliked Like button.
- *   We then click each one with page.mouse.click(x, y) which sends real mouse events.
- *   Already-liked posts are auto-skipped because their button text/aria-label changes
- *   to "Unlike" or a reaction name, so they never appear in the results.
+ * Key design:
+ *  - We iterate page.locator('[role="article"]').all() to get Playwright Locator
+ *    objects for each article currently in the DOM.
+ *  - For each article we call article.scrollIntoViewIfNeeded() so the browser
+ *    actually renders the article's buttons (Facebook uses a virtualised feed
+ *    that removes off-screen content from the DOM).
+ *  - We find the Like button INSIDE the article locator using multiple
+ *    strategies (aria-label, getByRole, text filter).
+ *  - Verification uses the Playwright locator itself: after clicking we re-read
+ *    the button's aria-label and check it changed to "Unlike" / a reaction label.
+ *  - Articles are deduplicated across scroll passes by their absolute Y position.
  *
  * Returns { postsLiked, commentsLiked, likedPosts, buttonsFound }.
  */
@@ -358,108 +279,117 @@ async function likePostsInGroup(groupUrl, opts) {
   try {
     await page.goto(groupUrl, { waitUntil: 'domcontentloaded' });
 
-    // Wait up to 20s for feed posts to render before we look for buttons
-    await page.waitForSelector('[role="article"]', { timeout: 20000 }).catch(() => {});
+    // Wait up to 25s for the first article to appear
+    await page.waitForSelector('[role="article"]', { timeout: 25000 }).catch(() => {});
     await sleep(rand(3000, 5000));
 
     if (await onLoginWall()) throw httpErr(503, 'NOT_LOGGED_IN');
     if (await page.getByText(BLOCKED_TEXT).first().isVisible().catch(() => false)) throw httpErr(429, 'BLOCKED_BY_FACEBOOK');
 
-    // Small human-like interaction to trigger any lazy button rendering
+    // Human-like micro-scroll to trigger lazy rendering
     await page.mouse.move(rand(400, 800), rand(300, 500));
-    await sleep(600);
-    await page.mouse.wheel(0, 300);
+    await sleep(500);
+    await page.mouse.wheel(0, 400);
     await sleep(rand(1500, 2500));
-    await page.mouse.wheel(0, -300);
+    await page.mouse.wheel(0, -400);
     await sleep(rand(1000, 1500));
 
-    // Log all like-related aria-labels so we can see what Facebook is rendering
+    // Diagnostic: show what like-related labels are on the page
     await debugLogLikeLabels(groupUrl);
 
-    const target  = Math.min(postsPerGroup, remainingQuota);
+    const target     = Math.min(postsPerGroup, remainingQuota);
     const likedPosts = [];
-    const seenKeys   = new Set(); // (x,y) dedup across scroll passes
+    // Dedup articles across scroll passes by absolute Y (bucketed to 60px)
+    const seenArticleKeys = new Set();
 
-    for (let scroll = 0; scroll <= scrollsPerGroup && likedPosts.length < target; scroll++) {
+    for (let pass = 0; pass <= scrollsPerGroup && likedPosts.length < target; pass++) {
       if (jobCancel()) break;
-      if (scroll > 0) {
-        await page.mouse.wheel(0, rand(500, 900));
+
+      // Scroll down on every pass after the first to load more articles
+      if (pass > 0) {
+        await page.keyboard.press('End');
         await sleep(rand(2000, 3500));
       }
 
-      // findLikeButtonPositions() returns absolute page coordinates
-      const positions = await findLikeButtonPositions();
-      console.log(`[${groupUrl}] scroll ${scroll}: found ${positions.length} like-button candidate(s)`);
-      if (positions.length) {
-        console.log(`[${groupUrl}] labels: ${JSON.stringify(positions.slice(0, 5).map(p => p.ariaLabel || p.visibleText))}`);
-      }
+      const articles = await page.locator('[role="article"]').all();
+      console.log(`[${groupUrl}] pass ${pass}: ${articles.length} article(s) in DOM`);
 
-      for (const pos of positions) {
+      // Shuffle so we don't always like the first N posts
+      const shuffled = [...articles].sort(() => Math.random() - 0.5);
+
+      for (const article of shuffled) {
         if (likedPosts.length >= target || jobCancel()) break;
 
-        // Deduplicate across scroll passes by absolute position
-        const posKey = `${Math.round(pos.absX / 3) * 3},${Math.round(pos.absY / 3) * 3}`;
-        if (seenKeys.has(posKey)) continue;
-        seenKeys.add(posKey);
+        // Get absolute Y of this article for deduplication
+        const articleAbsY = await article.evaluate(el => {
+          const r = el.getBoundingClientRect();
+          return Math.round(r.top + window.scrollY);
+        }).catch(() => -1);
 
-        // ── Scroll the button into the visible viewport ───────────────────
-        // This is essential: tall posts (images/videos) push Like bars below
-        // the visible area. We place the button near the vertical centre.
-        await page.evaluate(absY => window.scrollTo(0, Math.max(0, absY - 400)), pos.absY);
+        if (articleAbsY < 0) continue;
+        const articleKey = `y${Math.round(articleAbsY / 60) * 60}`;
+        if (seenArticleKeys.has(articleKey)) continue;
+        seenArticleKeys.add(articleKey);
+
+        // Scroll this specific article into the viewport so its buttons are rendered
+        await article.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
         await sleep(rand(600, 1000));
 
-        // Recalculate current viewport coordinates after scroll
-        const vpCoords = await page.evaluate(({ absX, absY }) => ({
-          x: absX - window.scrollX,
-          y: absY - window.scrollY,
-        }), { absX: pos.absX, absY: pos.absY }).catch(() => null);
-
-        if (!vpCoords) continue;
-        const { x: vpX, y: vpY } = vpCoords;
-
-        // Grab post details before clicking (DOM may update after the click)
-        const details = await page.evaluate(({ x, y }) => {
-          const el = document.elementFromPoint(x, y);
-          if (!el) return {};
-          let article = el;
-          while (article && article.getAttribute('role') !== 'article') {
-            article = article.parentElement;
-          }
-          if (!article) return {};
-          const timeLink = article.querySelector('a[href*="/posts/"], a[href*="story_fbid"], a[href*="/permalink/"]');
-          let postUrl = timeLink?.getAttribute('href') || null;
-          if (postUrl && !postUrl.startsWith('http')) postUrl = 'https://www.facebook.com' + postUrl;
-          const textEl = article.querySelector('[data-ad-preview="message"], div[dir="auto"]');
-          const postText = textEl ? (textEl.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 150) : null;
-          const authorEl = article.querySelector('h2 a, h3 a, strong a');
-          const author = authorEl ? (authorEl.innerText || '').trim() : null;
-          return { postUrl, postText, author };
-        }, { x: vpX, y: vpY }).catch(() => ({}));
-
-        await sleep(rand(500, 1000));
-
-        // ── Click ─────────────────────────────────────────────────────────
-        if (reaction === 'Like') {
-          await page.mouse.click(vpX, vpY);
-        } else {
-          await page.mouse.move(vpX, vpY);
-          await sleep(rand(1200, 2000));
-          const reactionBtn = page.locator(`[aria-label="${reaction}"][role="button"]`).first();
-          if (await reactionBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-            await reactionBtn.click();
-          } else {
-            await page.mouse.click(vpX, vpY);
-          }
-        }
-
-        // ── Verify ────────────────────────────────────────────────────────
-        const verified = await verifyLikeRegistered(vpX, vpY);
-        if (!verified) {
-          console.warn(`[${groupUrl}] click at (${Math.round(vpX)},${Math.round(vpY)}) NOT verified — skipping`);
+        // Find the Like button within this article
+        const btn = await findLikeButtonInArticle(article);
+        if (!btn) {
+          // Log what we did find to aid diagnosis
+          const articleLabels = await article.evaluate(el =>
+            [...el.querySelectorAll('[aria-label]')]
+              .map(e => e.getAttribute('aria-label'))
+              .filter(l => l)
+              .slice(0, 10)
+          ).catch(() => []);
+          console.log(`[${groupUrl}] article at absY=${articleAbsY}: no Like button found. Labels: ${JSON.stringify(articleLabels)}`);
           continue;
         }
 
-        // Proof screenshot — open /proof.png to confirm
+        // Capture post details BEFORE clicking (DOM may update after)
+        const details = await extractDetailsFromArticle(article);
+
+        await sleep(rand(300, 700));
+
+        // ── Click the Like / reaction button ──────────────────────────────
+        if (reaction === 'Like') {
+          await btn.click({ timeout: 10000 });
+        } else {
+          // Hover to open the floating reaction strip, then click the named reaction
+          await btn.hover({ timeout: 10000 });
+          await sleep(rand(1200, 2000));
+          const reactionBtn = page.locator(`[aria-label="${reaction}"][role="button"]`).first();
+          if (await reactionBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+            await reactionBtn.click({ timeout: 10000 });
+          } else {
+            await btn.click({ timeout: 10000 }); // fall back to plain Like
+          }
+        }
+
+        // ── Verify: check that the button now shows "Unlike" or a reaction ─
+        await sleep(2500); // give Facebook time to update the DOM
+        const labelAfter = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+        // Also check for a sibling/replacement "Unlike" button in the article
+        const hasUnlikeBtn = await article
+          .locator('[aria-label^="Unlike"], [aria-label^="Remove"]')
+          .count()
+          .then(n => n > 0)
+          .catch(() => false);
+
+        const verified = /^unlike|^remove/i.test(labelAfter) || hasUnlikeBtn;
+
+        if (!verified) {
+          console.warn(
+            `[${groupUrl}] click NOT verified — button aria-label after click: "${labelAfter}"` +
+            ` | hasUnlikeBtn: ${hasUnlikeBtn}`
+          );
+          continue;
+        }
+
+        // Proof screenshot — available at GET /proof.png
         lastProofPng = await page.screenshot().catch(() => null);
 
         const entry = {
@@ -472,13 +402,30 @@ async function likePostsInGroup(groupUrl, opts) {
         };
 
         if (doLikeComments && commentsPerPost > 0) {
-          await sleep(rand(1000, 2000));
-          entry.comments_liked = await likeComments(pos.absY, commentsPerPost, minDelay, maxDelay);
+          // Like comments within the same article
+          await sleep(rand(800, 1500));
+          let commentsLiked = 0;
+          const commentBtns = await article
+            .locator('[aria-label="Like"][role="button"], [aria-label="Like comment"][role="button"]')
+            .all();
+          const tolike = commentBtns.sort(() => Math.random() - 0.5).slice(0, commentsPerPost);
+          for (const cb of tolike) {
+            try {
+              const cbPressed = await cb.getAttribute('aria-pressed').catch(() => null);
+              const cbLabel   = (await cb.getAttribute('aria-label').catch(() => '')) || '';
+              if (cbPressed === 'true' || /^unlike/i.test(cbLabel)) continue;
+              await cb.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+              await cb.click({ timeout: 8000 });
+              commentsLiked++;
+              await sleep(rand(minDelay, maxDelay));
+            } catch { /* skip this comment */ }
+          }
+          entry.comments_liked = commentsLiked;
         }
 
         likedPosts.push(entry);
         console.log(
-          `[${groupUrl}] ✓ VERIFIED like ${likedPosts.length}/${target}` +
+          `[${groupUrl}] LIKED ${likedPosts.length}/${target}` +
           ` | author: "${entry.author || 'unknown'}"` +
           (entry.post_url  ? ` | ${entry.post_url}` : '') +
           (entry.post_text ? ` | "${entry.post_text.slice(0, 60)}..."` : '')
@@ -495,7 +442,7 @@ async function likePostsInGroup(groupUrl, opts) {
       postsLiked:    likedPosts.length,
       commentsLiked: totalComments,
       likedPosts,
-      buttonsFound:  seenKeys.size,
+      buttonsFound:  seenArticleKeys.size, // how many unique articles were examined
     };
   } catch (e) {
     lastErrorPng = await page.screenshot().catch(() => null);
