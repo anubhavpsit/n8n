@@ -171,22 +171,18 @@ async function clickReaction(btn, reaction) {
 }
 
 /**
- * Scan the live DOM via page.evaluate() to find all visible unliked Like buttons.
- * Returns an array of { x, y, ariaLabel, visibleText } viewport-coordinate objects.
+ * Scan the full DOM for unliked Like buttons and return their ABSOLUTE page positions.
+ * We use absolute coords (rect + scrollY/scrollX) so the caller can scroll each button
+ * into the viewport before clicking — this is the key fix for buttons that are below
+ * the visible area (tall posts with images/videos push the Like bar off-screen).
  *
- * Why evaluate() instead of Playwright selectors / getByRole():
- *   Facebook's DOM does not always expose proper ARIA roles that Playwright can query,
- *   and CSS selectors break whenever Facebook ships a build change.
- *   page.evaluate() runs inside the browser and sees the actual rendered DOM,
- *   so it is not affected by Playwright's accessibility-tree interpretation.
- *   We then click using page.mouse.click(x, y) which sends real mouse events.
+ * Returns [{ absX, absY, ariaLabel, visibleText }]
  */
 async function findLikeButtonPositions() {
   return await page.evaluate(() => {
     const results = [];
-    const seen   = new Set();
+    const seen    = new Set();
 
-    // Collect every potentially interactive element
     const candidates = new Set([
       ...document.querySelectorAll('[role="button"]'),
       ...document.querySelectorAll('button'),
@@ -196,38 +192,36 @@ async function findLikeButtonPositions() {
     for (const el of candidates) {
       const ariaLabel   = (el.getAttribute('aria-label') || '').trim();
       const ariaPressed = el.getAttribute('aria-pressed');
-      // innerText respects CSS visibility (hidden / display:none elements return '')
       const visibleText = (el.innerText || '').trim();
 
-      // Skip already-reacted buttons
+      // Skip already-reacted
       if (ariaPressed === 'true') continue;
       if (/^unlike|^remove/i.test(ariaLabel)) continue;
 
-      // Must look like a "Like" button
       const isLike =
         ariaLabel === 'Like' ||
         ariaLabel === 'Like post' ||
         visibleText === 'Like';
       if (!isLike) continue;
 
-      // Must be visible in the current viewport
       const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0)         continue;
-      if (rect.top < -20 || rect.top > window.innerHeight + 20) continue;
+      if (rect.width === 0 || rect.height === 0) continue;
+      // Note: NO viewport filter — include elements above/below the visible area.
+      // The caller will scroll each one into view before clicking.
 
-      // Deduplicate by position (3 px grid)
-      const key = `${Math.round(rect.x / 3) * 3},${Math.round(rect.y / 3) * 3}`;
+      // Absolute page position (survives scrolling)
+      const absX = rect.left + window.scrollX + rect.width  / 2;
+      const absY = rect.top  + window.scrollY + rect.height / 2;
+
+      const key = `${Math.round(absX / 3) * 3},${Math.round(absY / 3) * 3}`;
       if (seen.has(key)) continue;
       seen.add(key);
 
-      results.push({
-        x:           rect.x + rect.width  / 2,  // centre of element
-        y:           rect.y + rect.height / 2,
-        ariaLabel,
-        visibleText: visibleText.slice(0, 30),
-      });
+      results.push({ absX, absY, ariaLabel, visibleText: visibleText.slice(0, 30) });
     }
 
+    // Sort top-to-bottom so we process posts in feed order
+    results.sort((a, b) => a.absY - b.absY);
     return results;
   }).catch(() => []);
 }
@@ -393,78 +387,79 @@ async function likePostsInGroup(groupUrl, opts) {
         await sleep(rand(2000, 3500));
       }
 
-      // findLikeButtonPositions() runs JS inside the browser — sees the real DOM
+      // findLikeButtonPositions() returns absolute page coordinates
       const positions = await findLikeButtonPositions();
-      console.log(`[${groupUrl}] scroll ${scroll}: findLikeButtonPositions() → ${positions.length} candidate(s)`);
+      console.log(`[${groupUrl}] scroll ${scroll}: found ${positions.length} like-button candidate(s)`);
       if (positions.length) {
-        console.log(`[${groupUrl}] sample labels: ${JSON.stringify(positions.slice(0, 5).map(p => ({ ariaLabel: p.ariaLabel, text: p.visibleText })))}`);
+        console.log(`[${groupUrl}] labels: ${JSON.stringify(positions.slice(0, 5).map(p => p.ariaLabel || p.visibleText))}`);
       }
 
       for (const pos of positions) {
         if (likedPosts.length >= target || jobCancel()) break;
 
-        // Deduplicate by position (3 px grid, same as findLikeButtonPositions)
-        const posKey = `${Math.round(pos.x / 3) * 3},${Math.round(pos.y / 3) * 3}`;
+        // Deduplicate across scroll passes by absolute position
+        const posKey = `${Math.round(pos.absX / 3) * 3},${Math.round(pos.absY / 3) * 3}`;
         if (seenKeys.has(posKey)) continue;
         seenKeys.add(posKey);
 
-        // Grab post details from the article containing this button (before clicking)
+        // ── Scroll the button into the visible viewport ───────────────────
+        // This is essential: tall posts (images/videos) push Like bars below
+        // the visible area. We place the button near the vertical centre.
+        await page.evaluate(absY => window.scrollTo(0, Math.max(0, absY - 400)), pos.absY);
+        await sleep(rand(600, 1000));
+
+        // Recalculate current viewport coordinates after scroll
+        const vpCoords = await page.evaluate(({ absX, absY }) => ({
+          x: absX - window.scrollX,
+          y: absY - window.scrollY,
+        }), { absX: pos.absX, absY: pos.absY }).catch(() => null);
+
+        if (!vpCoords) continue;
+        const { x: vpX, y: vpY } = vpCoords;
+
+        // Grab post details before clicking (DOM may update after the click)
         const details = await page.evaluate(({ x, y }) => {
-          // Find the DOM element at these coordinates
           const el = document.elementFromPoint(x, y);
           if (!el) return {};
-
-          // Walk up to find the nearest article
           let article = el;
           while (article && article.getAttribute('role') !== 'article') {
             article = article.parentElement;
           }
           if (!article) return {};
-
-          // Post URL from timestamp link
           const timeLink = article.querySelector('a[href*="/posts/"], a[href*="story_fbid"], a[href*="/permalink/"]');
           let postUrl = timeLink?.getAttribute('href') || null;
           if (postUrl && !postUrl.startsWith('http')) postUrl = 'https://www.facebook.com' + postUrl;
-
-          // Post text
           const textEl = article.querySelector('[data-ad-preview="message"], div[dir="auto"]');
           const postText = textEl ? (textEl.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 150) : null;
-
-          // Author name
           const authorEl = article.querySelector('h2 a, h3 a, strong a');
           const author = authorEl ? (authorEl.innerText || '').trim() : null;
-
           return { postUrl, postText, author };
-        }, { x: pos.x, y: pos.y }).catch(() => ({}));
+        }, { x: vpX, y: vpY }).catch(() => ({}));
 
-        await sleep(rand(600, 1500));
+        await sleep(rand(500, 1000));
 
-        // Click the Like button
+        // ── Click ─────────────────────────────────────────────────────────
         if (reaction === 'Like') {
-          await page.mouse.click(pos.x, pos.y);
+          await page.mouse.click(vpX, vpY);
         } else {
-          await page.mouse.move(pos.x, pos.y);
+          await page.mouse.move(vpX, vpY);
           await sleep(rand(1200, 2000));
           const reactionBtn = page.locator(`[aria-label="${reaction}"][role="button"]`).first();
           if (await reactionBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
             await reactionBtn.click();
           } else {
-            await page.mouse.click(pos.x, pos.y); // fallback: plain like
+            await page.mouse.click(vpX, vpY);
           }
         }
 
-        // ── Verify the like actually registered ──────────────────────────────
-        const verified = await verifyLikeRegistered(pos.x, pos.y);
-
+        // ── Verify ────────────────────────────────────────────────────────
+        const verified = await verifyLikeRegistered(vpX, vpY);
         if (!verified) {
-          console.warn(
-            `[${groupUrl}] click at (${Math.round(pos.x)},${Math.round(pos.y)}) NOT verified` +
-            ` — button did not change to Unlike. Skipping this entry.`
-          );
-          continue; // don't count unverified clicks
+          console.warn(`[${groupUrl}] click at (${Math.round(vpX)},${Math.round(vpY)}) NOT verified — skipping`);
+          continue;
         }
 
-        // Take a proof screenshot immediately after the verified like
+        // Proof screenshot — open /proof.png to confirm
         lastProofPng = await page.screenshot().catch(() => null);
 
         const entry = {
@@ -478,7 +473,7 @@ async function likePostsInGroup(groupUrl, opts) {
 
         if (doLikeComments && commentsPerPost > 0) {
           await sleep(rand(1000, 2000));
-          entry.comments_liked = await likeComments(pos.y, commentsPerPost, minDelay, maxDelay);
+          entry.comments_liked = await likeComments(pos.absY, commentsPerPost, minDelay, maxDelay);
         }
 
         likedPosts.push(entry);
@@ -650,6 +645,34 @@ app.get('/last-error.png', (req, res) => {
 app.get('/proof.png', (req, res) => {
   if (!lastProofPng) return res.status(404).send('No proof screenshot yet — no verified like has been recorded');
   res.type('png').send(lastProofPng);
+});
+
+// Debug: dumps all interactive elements on the current page.
+// Use this to understand what Facebook is actually rendering.
+// Steps: 1) navigate the bot to a group via /status  2) call this endpoint
+app.get('/debug-page', async (req, res) => {
+  try {
+    const result = await enqueue(() => page.evaluate(() => {
+      const url = location.href;
+      const articles = document.querySelectorAll('[role="article"]').length;
+      const buttons = [];
+      document.querySelectorAll('[role="button"], button, [tabindex="0"]').forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const ariaLabel   = el.getAttribute('aria-label') || '';
+        const ariaPressed = el.getAttribute('aria-pressed') || '';
+        const text        = (el.innerText || '').trim().slice(0, 60);
+        if (!ariaLabel && !text) return;
+        buttons.push({ tag: el.tagName, ariaLabel, ariaPressed, text,
+          x: Math.round(rect.x), y: Math.round(rect.y),
+          absY: Math.round(rect.top + window.scrollY) });
+      });
+      return { url, articles, totalButtons: buttons.length, buttons };
+    }));
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/cookies', async (req, res) => {
