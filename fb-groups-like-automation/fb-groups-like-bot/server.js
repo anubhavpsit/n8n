@@ -6,18 +6,21 @@
 //   GET  /status          -> { loggedIn, hasSessionCookie, url }
 //   GET  /screen.png      -> live screenshot of what the browser sees (debugging)
 //   GET  /last-error.png  -> screenshot taken when the last group failed
+//   GET  /proof.png       -> screenshot taken right after the most recent verified like
 //   POST /cookies         -> import cookies exported from your normal browser (login option B)
 //   POST /jobs            -> start a like-job; body:
 //        { groups, posts_per_group, like_comments, comments_per_post,
-//          min_delay_seconds, max_delay_seconds, reaction, scrolls_per_group }
-//        groups             = array, or one string with one URL per line / comma separated
-//        posts_per_group    = max posts to like per group (default 5)
-//        like_comments      = true/false - also like comments (default false)
-//        comments_per_post  = max comments to like per post (default 3)
-//        min_delay_seconds  = min delay between likes in seconds (default 5)
-//        max_delay_seconds  = max delay between likes in seconds (default 15)
-//        reaction           = Like | Love | Haha | Wow | Sad | Angry (default Like)
-//        scrolls_per_group  = how many times to scroll to load more posts (default 5)
+//          min_delay_seconds, max_delay_seconds, between_groups_minutes,
+//          reaction, scrolls_per_group }
+//        groups                  = array, or one string with one URL per line / comma separated
+//        posts_per_group         = max posts to like per group (default 5)
+//        like_comments           = true/false - also like comments (default false)
+//        comments_per_post       = max comments to like per post (default 3)
+//        min_delay_seconds       = min delay BETWEEN LIKES within a group (default 8)
+//        max_delay_seconds       = max delay BETWEEN LIKES within a group (default 20)
+//        between_groups_minutes  = wait between finishing one group and starting the next (default 2)
+//        reaction                = Like | Love | Haha | Wow | Sad | Angry (default Like)
+//        scrolls_per_group       = how many times to scroll to load more posts (default 5)
 //        returns { id } immediately (202); poll GET /jobs/:id
 //   GET  /jobs            -> recent jobs (newest first)
 //   GET  /jobs/:id        -> { status: queued|running|done|stopped, results: [...] }
@@ -25,6 +28,8 @@
 //
 // Safety: likes per group are capped per day via like-history.json,
 // delays between actions are randomised to mimic human behaviour.
+// Every click is verified: the bot checks that the button changed to "Unlike"
+// before recording the like — unverified clicks are logged but not counted.
 
 const express = require('express');
 const path = require('path');
@@ -60,6 +65,7 @@ let context;
 let page;
 let queue = Promise.resolve();
 let lastErrorPng = null;
+let lastProofPng  = null;  // screenshot taken right after the most recent verified like
 const jobs = new Map();
 
 function enqueue(task) {
@@ -249,6 +255,27 @@ async function debugLogLikeLabels(groupUrl) {
 }
 
 /**
+ * After clicking a Like button at (x, y), wait briefly then check whether
+ * the element at that position (or any ancestor) now shows "Unlike" or a
+ * reaction-remove label. Returns true = like confirmed, false = unverified.
+ */
+async function verifyLikeRegistered(x, y) {
+  await sleep(2500); // give Facebook time to update the DOM
+  return await page.evaluate(({ x, y }) => {
+    let el = document.elementFromPoint(x, y);
+    let steps = 0;
+    while (el && steps < 12) {
+      const label = (el.getAttribute('aria-label') || '').toLowerCase();
+      const text  = (el.innerText || '').trim().toLowerCase();
+      if (/^unlike|^remove/.test(label) || text === 'unlike') return true;
+      el = el.parentElement;
+      steps++;
+    }
+    return false;
+  }, { x, y }).catch(() => false);
+}
+
+/**
  * Extract human-readable details from the article element containing a like button.
  * Returns { postUrl, postText, author } — any may be null if not found.
  */
@@ -412,14 +439,12 @@ async function likePostsInGroup(groupUrl, opts) {
 
         await sleep(rand(600, 1500));
 
-        // Click the Like button — for plain Like just click directly
-        // For other reactions, hover first to open the reaction strip
+        // Click the Like button
         if (reaction === 'Like') {
           await page.mouse.click(pos.x, pos.y);
         } else {
           await page.mouse.move(pos.x, pos.y);
           await sleep(rand(1200, 2000));
-          // Try clicking the named reaction from the popup strip
           const reactionBtn = page.locator(`[aria-label="${reaction}"][role="button"]`).first();
           if (await reactionBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
             await reactionBtn.click();
@@ -428,11 +453,26 @@ async function likePostsInGroup(groupUrl, opts) {
           }
         }
 
+        // ── Verify the like actually registered ──────────────────────────────
+        const verified = await verifyLikeRegistered(pos.x, pos.y);
+
+        if (!verified) {
+          console.warn(
+            `[${groupUrl}] click at (${Math.round(pos.x)},${Math.round(pos.y)}) NOT verified` +
+            ` — button did not change to Unlike. Skipping this entry.`
+          );
+          continue; // don't count unverified clicks
+        }
+
+        // Take a proof screenshot immediately after the verified like
+        lastProofPng = await page.screenshot().catch(() => null);
+
         const entry = {
           post_url:  details.postUrl  || null,
           author:    details.author   || null,
           post_text: details.postText || null,
           reaction,
+          verified:  true,
           liked_at:  new Date().toISOString(),
         };
 
@@ -443,7 +483,7 @@ async function likePostsInGroup(groupUrl, opts) {
 
         likedPosts.push(entry);
         console.log(
-          `[${groupUrl}] liked ${likedPosts.length}/${target}` +
+          `[${groupUrl}] ✓ VERIFIED like ${likedPosts.length}/${target}` +
           ` | author: "${entry.author || 'unknown'}"` +
           (entry.post_url  ? ` | ${entry.post_url}` : '') +
           (entry.post_text ? ` | "${entry.post_text.slice(0, 60)}..."` : '')
@@ -538,13 +578,13 @@ async function runJob(job) {
         }
       }
 
-      // Delay before the next group
+      // Delay before the next group — use dedicated between_groups_minutes
       const more = job.results.slice(i + 1).some((x) => x.status === 'waiting');
       if (more && !job.cancel) {
-        const wait = rand(
-          job.min_delay_seconds * 1000,
-          job.max_delay_seconds * 1000 * 3  // larger gap between groups
-        );
+        const minWait = job.between_groups_minutes * 60000;
+        const maxWait = Math.round(minWait * 1.5); // ±50% randomness
+        const wait    = rand(minWait, maxWait);
+        console.log(`[${job.id}] waiting ${Math.round(wait / 1000)}s before next group…`);
         job.next_at = new Date(Date.now() + wait).toISOString();
         for (let t = 0; t < wait && !job.cancel; t += 5000) await sleep(Math.min(5000, wait - t));
         job.next_at = null;
@@ -605,6 +645,13 @@ app.get('/last-error.png', (req, res) => {
   res.type('png').send(lastErrorPng);
 });
 
+// Proof screenshot: taken immediately after each verified like.
+// Open this in a browser to confirm the like was actually registered on Facebook.
+app.get('/proof.png', (req, res) => {
+  if (!lastProofPng) return res.status(404).send('No proof screenshot yet — no verified like has been recorded');
+  res.type('png').send(lastProofPng);
+});
+
 app.post('/cookies', async (req, res) => {
   const list = Array.isArray(req.body) ? req.body : req.body.cookies;
   if (!Array.isArray(list)) return res.status(400).json({ error: 'Send the exported cookie JSON array' });
@@ -648,18 +695,19 @@ app.post('/jobs', (req, res) => {
   const id  = crypto.randomBytes(5).toString('hex');
   const job = {
     id,
-    status:           'queued',
-    created_at:        new Date().toISOString(),
-    posts_per_group:   Math.max(1, Math.min(MAX_LIKES_PER_GROUP_PER_DAY, num(req.body.posts_per_group, 5))),
-    like_comments:     bool(req.body.like_comments, false),
-    comments_per_post: Math.max(1, num(req.body.comments_per_post, 3)),
-    min_delay_seconds: Math.max(3, num(req.body.min_delay_seconds, 5)),
-    max_delay_seconds: Math.max(5, num(req.body.max_delay_seconds, 15)),
+    status:                 'queued',
+    created_at:              new Date().toISOString(),
+    posts_per_group:         Math.max(1, Math.min(MAX_LIKES_PER_GROUP_PER_DAY, num(req.body.posts_per_group, 5))),
+    like_comments:           bool(req.body.like_comments, false),
+    comments_per_post:       Math.max(1, num(req.body.comments_per_post, 3)),
+    min_delay_seconds:       Math.max(5, num(req.body.min_delay_seconds, 8)),   // between likes
+    max_delay_seconds:       Math.max(10, num(req.body.max_delay_seconds, 20)), // between likes
+    between_groups_minutes:  Math.max(1, num(req.body.between_groups_minutes, 2)), // between groups
     reaction,
-    scrolls_per_group: Math.max(1, num(req.body.scrolls_per_group, 5)),
-    results:           groups.map((group) => ({ group, status: 'waiting' })),
+    scrolls_per_group:       Math.max(1, num(req.body.scrolls_per_group, 5)),
+    results:                 groups.map((group) => ({ group, status: 'waiting' })),
     invalid,
-    cancel:            false,
+    cancel:                  false,
   };
   job.max_delay_seconds = Math.max(job.min_delay_seconds, job.max_delay_seconds);
 
@@ -673,6 +721,9 @@ app.post('/jobs', (req, res) => {
     posts_per_group: job.posts_per_group,
     reaction: job.reaction,
     like_comments: job.like_comments,
+    min_delay_seconds: job.min_delay_seconds,
+    max_delay_seconds: job.max_delay_seconds,
+    between_groups_minutes: job.between_groups_minutes,
     invalid,
   });
 });

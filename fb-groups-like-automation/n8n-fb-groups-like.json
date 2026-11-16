@@ -72,7 +72,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  groups: [\n    \"https://www.facebook.com/groups/1097936073608258\",\n    \"https://www.facebook.com/groups/1098967350204669\",\n    \"https://www.facebook.com/groups/1133757987335563\"\n  ],\n  posts_per_group: 5,\n  like_comments: false,\n  comments_per_post: 3,\n  min_delay_seconds: 5,\n  max_delay_seconds: 15,\n  reaction: \"Like\",\n  scrolls_per_group: 5\n}) }}",
+        "jsonBody": "={{ JSON.stringify({\n  groups: [\n    \"https://www.facebook.com/groups/1097936073608258\",\n    \"https://www.facebook.com/groups/1098967350204669\",\n    \"https://www.facebook.com/groups/1133757987335563\"\n  ],\n  posts_per_group: 5,\n  like_comments: false,\n  comments_per_post: 3,\n  min_delay_seconds: 8,\n  max_delay_seconds: 20,\n  between_groups_minutes: 2,\n  reaction: \"Like\",\n  scrolls_per_group: 5\n}) }}",
         "options": {
           "timeout": 30000
         }
